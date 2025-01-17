@@ -1,0 +1,33 @@
+name: "JF Ignore Rules Trigger"
+
+on:
+  push:
+    paths:
+      - 'ignore/.jfignore'
+
+env:
+  JFPROJECT: ${{ vars.JFPJ }}
+  WATCHES: ${{ vars.WHATCH }}
+  PATHIGNORERULE: ${{ vars.IR }}
+
+jobs:
+  build:
+    name: "Ignore CVE"
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - uses: jfrog/setup-jfrog-cli@v4
+      env:
+        JF_URL: ${{ secrets.ARTIFACTORY_URL }}
+        JF_USER: ${{ secrets.ARTIFACTORY_USERNAME }}
+        JF_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+
+    - name: Make script executable
+      run: chmod +x ./scripts/ir
+
+    - name: Add or replace ignore rules
+      run: |
+        ./scripts/ir $JFPROJECT $WATCHES $PATHIGNORERULE
