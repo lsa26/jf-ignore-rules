@@ -1,0 +1,148 @@
+#!/bin/bash
+# Check if the correct number of parameters is provided
+if [ $# -ne 3 ]; then
+    echo "Usage: $0 <project_name> <watch> <ignore_file>"
+    exit 1
+fi
+
+# Variables passed as parameters
+JF_PROJECT=$1  # Project name
+WATCH=$2       # Watch
+JF_IGNORE_FILE=$3  # Name of the ignore file
+
+# API URL
+JF_API_URL="/api/v1/ignore_rules"
+
+# Function to format the expiration date in ISO 8601 format (YYYY-MM-DDT00:00:00Z)
+format_expiration() {
+    local EXPIRED_AT="$1"
+    if [ -z "$EXPIRED_AT" ]; then
+        # Return null if the date is empty
+        echo "null"
+    else
+        # Add "T00:00:00Z" to complete the format and wrap it in quotes
+        echo "\"${EXPIRED_AT}T00:00:00Z\""
+    fi
+}
+
+# Function to create the cURL request
+create_curl_request() {
+    local CVE_ID="$1"
+    local EXPIRED_AT="$2"
+
+    # Format the expiration date correctly
+    local EXPIRES_AT=$(format_expiration "$EXPIRED_AT")
+
+    # Build the JSON payload
+    local PAYLOAD=$(cat <<EOF
+{
+    "notes": "Ignore $CVE_ID when watch is $WATCH",
+    "expires_at": $EXPIRES_AT,
+    "ignore_filters": {
+        "cves": [
+            "$CVE_ID"
+        ],
+        "watches": [
+            "$WATCH"
+        ]
+    }
+}
+EOF
+    )
+
+    # Print the request for debugging
+    echo "Executing jf xr curl request for CVE: $CVE_ID"
+    echo "Payload sent: $PAYLOAD"
+
+    # Execute the cURL command
+    jf xr curl -X POST "$JF_API_URL?projectKey=$JF_PROJECT" -s \
+    -H "Content-Type: application/json" \
+    -d "$PAYLOAD"
+}
+
+# Function to get all existing ignore rules
+get_existing_ignore_rules() {
+    jf xr curl -X GET "$JF_API_URL?projectKey=$JF_PROJECT" -s
+}
+
+# Retrieve existing rules
+response=$(get_existing_ignore_rules)
+
+# Parse the existing rules into arrays
+existing_cves=()
+existing_expirations=()
+existing_ids=()
+while IFS= read -r line; do
+    cve=$(echo "$line" | jq -r '.ignore_filters.cves[0]')
+    expires_at=$(echo "$line" | jq -r '.expires_at | select(. != null) // "null"')
+    expires_at_date="${expires_at:0:10}"
+    rule_id=$(echo "$line" | jq -r '.id')
+
+    existing_cves+=("$cve")
+    existing_expirations+=("$expires_at_date")
+    existing_ids+=("$rule_id")
+done <<< "$(echo "$response" | jq -c '.data[]')"
+
+# Function to check if the rule exists and decide if it should be created or updated
+check_and_create_rule() {
+    local CVE_ID="$1"
+    local EXPIRED_AT="$2"
+
+    # Extract date part from EXPIRED_AT
+    local expired_at_date="${EXPIRED_AT}"
+
+    # Debug: Print CVE and dates being compared
+    echo "Checking CVE: $CVE_ID"
+    echo "Ignore file date: $expired_at_date"
+
+    # Initialize found flag
+    local found=false
+    local rule_id=""
+    local existing_expiry=""
+    local rules_to_delete=()
+
+    # Iterate over existing rules to check if the CVE already exists
+    for i in "${!existing_cves[@]}"; do
+        if [[ "${existing_cves[$i]}" == "$CVE_ID" ]]; then
+            found=true
+            existing_expiry="${existing_expirations[$i]}"
+            rule_id="${existing_ids[$i]}"
+
+            if [[ "$expired_at_date" < "$existing_expiry" ]]; then
+                # Add rule ID to delete list if the new date is earlier
+                rules_to_delete+=("$rule_id")
+            elif [[ "$expired_at_date" == "$existing_expiry" ]]; then
+                echo "Not creating rule for $CVE_ID as it already exists with the same expiration date ($existing_expiry)."
+                return
+            fi
+        fi
+    done
+
+    # Create the new rule
+    echo "Creating rule for $CVE_ID with expiration date $expired_at_date."
+    create_curl_request "$CVE_ID" "$expired_at_date"
+
+    # Delete old rules with later expiration dates
+    for rule_id in "${rules_to_delete[@]}"; do
+        echo "Deleting existing rule with ID $rule_id and expiration date $existing_expiry."
+        jf xr curl -X DELETE "$JF_API_URL/$rule_id?projectKey=$JF_PROJECT" -s
+    done
+}
+
+# Read the .jfignore file and create or update rules
+while read -r line; do
+    # Ignore empty lines and comments
+    if [[ -z "$line" || "$line" == \#* ]]; then
+        continue
+    fi
+
+    # Check if an expiration date is present (format: exp:YYYY-MM-DD)
+    if [[ "$line" == *"exp:"* ]]; then
+        CVE_ID=$(echo "$line" | awk '{print $1}')
+        EXPIRED_AT=$(echo "$line" | awk '{print $2}' | cut -d':' -f2)
+        check_and_create_rule "$CVE_ID" "$EXPIRED_AT"
+    else
+        CVE_ID=$(echo "$line" | awk '{print $1}')
+        check_and_create_rule "$CVE_ID" ""
+    fi
+done < <(cat "$JF_IGNORE_FILE"; echo)
