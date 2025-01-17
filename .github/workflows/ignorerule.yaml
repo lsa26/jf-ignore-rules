@@ -7,7 +7,7 @@ on:
 
 env:
   JFPROJECT: ${{ vars.JFPJ }}
-  WATCHES: ${{ vars.WHATCH }}
+  WATCHES: ${{ vars.WATCH }}
   PATHIGNORERULE: ${{ vars.IR }}
 
 jobs:
